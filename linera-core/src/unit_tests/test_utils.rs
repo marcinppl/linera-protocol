@@ -17,10 +17,11 @@ use futures::{
 };
 use linera_base::{
     crypto::{
-        AccountPublicKey, AccountSecretKey, CryptoHash, ValidatorKeypair, ValidatorPublicKey,
+        AccountPublicKey, AccountSecretKey, CryptoHash, SigningKey, ValidatorKeypair,
+        ValidatorPublicKey,
     },
     data_types::*,
-    identifiers::{BlobId, ChainDescription, ChainId},
+    identifiers::{AccountOwner, BlobId, ChainDescription, ChainId},
 };
 use linera_chain::{
     data_types::BlockProposal,
@@ -50,7 +51,7 @@ use {
 };
 
 use crate::{
-    client::{ChainClient, Client},
+    client::{ChainClient, Client, SigningKeys},
     data_types::*,
     node::{
         CrossChainMessageDelivery, NodeError, NotificationStream, ValidatorNode,
@@ -655,7 +656,8 @@ where
 // * When using `LocalValidatorClient`, clients communicate with an exact quorum then stop.
 // * Most tests have 1 faulty validator out 4 so that there is exactly only 1 quorum to
 // communicate with.
-pub struct TestBuilder<B: StorageBuilder> {
+#[allow(dead_code)]
+pub struct TestBuilder<B: StorageBuilder, S: SigningKey = AccountSecretKey> {
     storage_builder: B,
     pub initial_committee: Committee,
     admin_id: ChainId,
@@ -663,6 +665,7 @@ pub struct TestBuilder<B: StorageBuilder> {
     validator_clients: Vec<LocalValidatorClient<B::Storage>>,
     validator_storages: HashMap<ValidatorPublicKey, B::Storage>,
     chain_client_storages: Vec<B::Storage>,
+    keys: Box<dyn SigningKeys<S>>,
 }
 
 #[async_trait]
@@ -720,33 +723,38 @@ impl GenesisStorageBuilder {
     }
 }
 
-impl<B> TestBuilder<B>
+impl<B, S> TestBuilder<B, S>
 where
     B: StorageBuilder,
+    S: SigningKey + Clone,
 {
     pub async fn new(
         mut storage_builder: B,
         count: usize,
         with_faulty_validators: usize,
+        mut keys: impl SigningKeys<S> + 'static,
     ) -> Result<Self, anyhow::Error> {
-        let mut key_pairs = Vec::new();
         let mut validators = Vec::new();
         for _ in 0..count {
             let validator_keypair = ValidatorKeypair::generate();
-            let account_secret = AccountSecretKey::generate();
-            validators.push((validator_keypair.public_key, account_secret.public()));
-            key_pairs.push(validator_keypair.secret_key);
+            let account_secret = <S as SigningKey>::generate_new();
+            validators.push((validator_keypair, account_secret.public()));
+            keys.insert(account_secret);
         }
-        let initial_committee = Committee::make_simple(validators);
+        let for_committee = validators
+            .iter()
+            .map(|(validating, account)| (validating.public_key, *account))
+            .collect::<Vec<_>>();
+        let initial_committee = Committee::make_simple(for_committee);
         let mut validator_clients = Vec::new();
         let mut validator_storages = HashMap::new();
         let mut faulty_validators = HashSet::new();
-        for (i, validator_secret) in key_pairs.into_iter().enumerate() {
-            let validator_public_key = validator_secret.public();
+        for (i, (validator_keypair, _account_public_key)) in validators.into_iter().enumerate() {
+            let validator_public_key = validator_keypair.public_key;
             let storage = storage_builder.build().await?;
             let state = WorkerState::new(
                 format!("Node {}", i),
-                Some(validator_secret),
+                Some(validator_keypair.secret_key),
                 storage.clone(),
                 NonZeroUsize::new(100).expect("Chain worker limit should not be zero"),
             )
@@ -772,6 +780,7 @@ where
             validator_clients,
             validator_storages,
             chain_client_storages: Vec::new(),
+            keys: Box::new(keys),
         })
     }
 
@@ -803,7 +812,8 @@ where
         &mut self,
         index: u32,
         balance: Amount,
-    ) -> Result<ChainClient<NodeProvider<B::Storage>, B::Storage>, anyhow::Error> {
+    ) -> Result<ChainClient<NodeProvider<B::Storage>, B::Storage, AccountSecretKey>, anyhow::Error>
+    {
         // Make sure the admin chain is initialized.
         if self.genesis_storage_builder.accounts.is_empty() && index != 0 {
             Box::pin(self.add_root_chain(0, Amount::ZERO)).await?;
@@ -903,7 +913,8 @@ where
         key_pair: AccountSecretKey,
         block_hash: Option<CryptoHash>,
         block_height: BlockHeight,
-    ) -> Result<ChainClient<NodeProvider<B::Storage>, B::Storage>, anyhow::Error> {
+    ) -> Result<ChainClient<NodeProvider<B::Storage>, B::Storage, AccountSecretKey>, anyhow::Error>
+    {
         // Note that new clients are only given the genesis store: they must figure out
         // the rest by asking validators.
         let storage = self.make_storage().await?;
@@ -921,9 +932,10 @@ where
             DEFAULT_GRACE_PERIOD,
             Duration::from_secs(1),
         ));
+
         Ok(builder.create_chain_client(
             chain_id,
-            vec![key_pair],
+            Box::new(vec![key_pair]),
             self.admin_id,
             block_hash,
             Timestamp::from(0),
@@ -1003,6 +1015,36 @@ where
             let chain = guard.state.chain_state_view(chain_id).await.unwrap();
             assert_eq!(chain.outboxes.indices().await.unwrap(), []);
         }
+    }
+}
+
+pub struct InMemSigningKeys<S>(BTreeMap<AccountOwner, S>);
+impl<S> InMemSigningKeys<S> {
+    pub fn new() -> Self {
+        InMemSigningKeys(BTreeMap::new())
+    }
+}
+impl Default for InMemSigningKeys<AccountSecretKey> {
+    fn default() -> Self {
+        InMemSigningKeys::new()
+    }
+}
+
+impl SigningKeys<AccountSecretKey> for InMemSigningKeys<AccountSecretKey> {
+    fn get(&self, owner: &AccountOwner) -> Option<AccountSecretKey> {
+        self.0.get(owner).map(|key| key.copy())
+    }
+
+    fn contains_key(&self, owner: &AccountOwner) -> bool {
+        self.0.contains_key(owner)
+    }
+
+    // fn generate_new<R: CryptoRng>(rng: &mut R) -> AccountSecretKey {
+    // AccountSecretKey::generate_from(rng)
+    // }
+
+    fn insert(&mut self, new_key: AccountSecretKey) {
+        self.0.insert(new_key.public().into(), new_key);
     }
 }
 

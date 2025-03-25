@@ -12,8 +12,8 @@ use custom_debug_derive::Debug;
 use linera_base::{
     bcs,
     crypto::{
-        AccountPublicKey, AccountSecretKey, AccountSignature, BcsHashable, BcsSignable,
-        CryptoError, CryptoHash, ValidatorPublicKey, ValidatorSecretKey, ValidatorSignature,
+        AccountPublicKey, AccountSignature, BcsHashable, BcsSignable, CryptoError, CryptoHash,
+        SigningKey, ValidatorPublicKey, ValidatorSecretKey, ValidatorSignature,
     },
     data_types::{Amount, Blob, BlockHeight, Event, OracleResponse, Round, Timestamp},
     doc_scalar, ensure,
@@ -614,7 +614,7 @@ pub struct ProposalContent {
 }
 
 impl BlockProposal {
-    pub fn new_initial(round: Round, block: ProposedBlock, secret: &AccountSecretKey) -> Self {
+    pub fn new_initial<S: SigningKey>(round: Round, block: ProposedBlock, secret: S) -> Self {
         let content = ProposalContent {
             round,
             block,
@@ -629,10 +629,10 @@ impl BlockProposal {
         }
     }
 
-    pub fn new_retry(
+    pub fn new_retry<S: SigningKey>(
         round: Round,
         validated_block_certificate: ValidatedBlockCertificate,
-        secret: &AccountSecretKey,
+        secret: S,
     ) -> Self {
         let lite_cert = validated_block_certificate.lite_certificate().cloned();
         let block = validated_block_certificate.into_inner().into_inner();

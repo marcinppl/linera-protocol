@@ -26,7 +26,7 @@ use futures::{
 use linera_base::prometheus_util::MeasureLatency as _;
 use linera_base::{
     abi::Abi,
-    crypto::{AccountPublicKey, AccountSecretKey, CryptoHash, ValidatorPublicKey},
+    crypto::{AccountPublicKey, CryptoHash, SigningKey, ValidatorPublicKey},
     data_types::{
         Amount, ApplicationPermissions, ArithmeticError, Blob, BlobContent, BlockHeight, Round,
         Timestamp,
@@ -144,9 +144,10 @@ mod metrics {
 }
 
 /// A builder that creates [`ChainClient`]s which share the cache and notifiers.
-pub struct Client<ValidatorNodeProvider, Storage>
+pub struct Client<ValidatorNodeProvider, Storage, Key>
 where
     Storage: linera_storage::Storage,
+    Key: SigningKey,
 {
     /// How to talk to the validators.
     validator_node_provider: ValidatorNodeProvider,
@@ -171,14 +172,14 @@ where
     /// to retrieve it.
     storage: Storage,
     /// Chain state for the managed chains.
-    chains: DashMap<ChainId, ChainClientState>,
+    chains: DashMap<ChainId, ChainClientState<Key>>,
     /// The maximum active chain workers.
     max_loaded_chains: NonZeroUsize,
     /// The delay when downloading a blob, after which we try a second validator.
     blob_download_timeout: Duration,
 }
 
-impl<P, S: Storage + Clone> Client<P, S> {
+impl<Key: SigningKey, P, S: Storage + Clone> Client<P, S, Key> {
     /// Creates a new `Client` with a new cache and notifiers.
     #[allow(clippy::too_many_arguments)]
     #[instrument(level = "trace", skip_all)]
@@ -284,13 +285,13 @@ impl<P, S: Storage + Clone> Client<P, S> {
     pub fn create_chain_client(
         self: &Arc<Self>,
         chain_id: ChainId,
-        known_key_pairs: Vec<AccountSecretKey>,
+        known_key_pairs: Box<dyn SigningKeys<Key>>,
         admin_id: ChainId,
         block_hash: Option<CryptoHash>,
         timestamp: Timestamp,
         next_block_height: BlockHeight,
         pending_proposal: Option<PendingProposal>,
-    ) -> ChainClient<P, S> {
+    ) -> ChainClient<P, S, Key> {
         // If the entry already exists we assume that the entry is more up to date than
         // the arguments: If they were read from the wallet file, they might be stale.
         if let dashmap::mapref::entry::Entry::Vacant(e) = self.chains.entry(chain_id) {
@@ -318,10 +319,11 @@ impl<P, S: Storage + Clone> Client<P, S> {
     }
 }
 
-impl<P, S> Client<P, S>
+impl<P, S, K> Client<P, S, K>
 where
     P: ValidatorNodeProvider + Sync + 'static,
     S: Storage + Sync + Send + Clone + 'static,
+    K: SigningKey + Send + Sync + 'static,
 {
     /// Downloads and processes all certificates up to (excluding) the specified height.
     #[instrument(level = "trace", skip(self, validators))]
@@ -524,13 +526,14 @@ pub struct ChainClientOptions {
 /// * As a rule, operations are considered successful (and communication may stop) when
 ///   they succeeded in gathering a quorum of responses.
 #[derive(Debug)]
-pub struct ChainClient<ValidatorNodeProvider, Storage>
+pub struct ChainClient<ValidatorNodeProvider, Storage, Key>
 where
     Storage: linera_storage::Storage,
+    Key: SigningKey,
 {
     /// The Linera [`Client`] that manages operations for this chain client.
     #[debug(skip)]
-    client: Arc<Client<ValidatorNodeProvider, Storage>>,
+    client: Arc<Client<ValidatorNodeProvider, Storage, Key>>,
     /// The off-chain chain ID.
     chain_id: ChainId,
     /// The ID of the admin chain.
@@ -541,9 +544,10 @@ where
     options: ChainClientOptions,
 }
 
-impl<P, S> Clone for ChainClient<P, S>
+impl<P, S, K> Clone for ChainClient<P, S, K>
 where
     S: linera_storage::Storage,
+    K: SigningKey,
 {
     fn clone(&self) -> Self {
         Self {
@@ -555,6 +559,47 @@ where
     }
 }
 
+#[cfg(not(web))]
+use async_trait::async_trait;
+
+#[cfg_attr(not(web), async_trait)]
+pub trait SigningKeys<S: SigningKey>: Send + Sync {
+    fn insert(&mut self, new_key: S);
+    fn get(&self, owner: &AccountOwner) -> Option<S>;
+    fn contains_key(&self, owner: &AccountOwner) -> bool;
+}
+
+impl<S: SigningKey + Send + Sync + Clone> SigningKeys<S> for S {
+    fn get(&self, owner: &AccountOwner) -> Option<S> {
+        if AccountOwner::from(SigningKey::public(self)) == *owner {
+            Some(self.clone())
+        } else {
+            None
+        }
+    }
+
+    fn contains_key(&self, owner: &AccountOwner) -> bool {
+        AccountOwner::from(SigningKey::public(self)) == *owner
+    }
+
+    fn insert(&mut self, _new_key: S) {
+        panic!("Cannot insert a new key into a single key")
+    }
+}
+
+impl<S: SigningKey + Send + Sync + Clone> SigningKeys<S> for Vec<S> {
+    fn get(&self, owner: &AccountOwner) -> Option<S> {
+        self.iter().find_map(|key| key.get(owner))
+    }
+
+    fn contains_key(&self, owner: &AccountOwner) -> bool {
+        self.iter().any(|key| key.contains_key(owner))
+    }
+
+    fn insert(&mut self, new_key: S) {
+        self.push(new_key);
+    }
+}
 /// Error type for [`ChainClient`].
 #[derive(Debug, Error)]
 pub enum ChainClientError {
@@ -660,12 +705,12 @@ impl<T: DerefMut> DerefMut for Unsend<T> {
 
 pub type ChainGuard<'a, T> = Unsend<DashMapRef<'a, ChainId, T>>;
 pub type ChainGuardMut<'a, T> = Unsend<DashMapRefMut<'a, ChainId, T>>;
-pub type ChainGuardMapped<'a, T> = Unsend<DashMapMappedRef<'a, ChainId, ChainClientState, T>>;
+pub type ChainGuardMapped<'a, T, K> = Unsend<DashMapMappedRef<'a, ChainId, ChainClientState<K>, T>>;
 
-impl<P: 'static, S: Storage> ChainClient<P, S> {
+impl<P: 'static, S: Storage, K: SigningKey> ChainClient<P, S, K> {
     /// Gets a shared reference to the chain's state.
     #[instrument(level = "trace", skip(self))]
-    pub fn state(&self) -> ChainGuard<ChainClientState> {
+    pub fn state(&self) -> ChainGuard<ChainClientState<K>> {
         Unsend::new(
             self.client
                 .chains
@@ -677,7 +722,7 @@ impl<P: 'static, S: Storage> ChainClient<P, S> {
     /// Gets a mutable reference to the state.
     /// Beware: this will block any other reference to any chain's state!
     #[instrument(level = "trace", skip(self))]
-    fn state_mut(&self) -> ChainGuardMut<ChainClientState> {
+    fn state_mut(&self) -> ChainGuardMut<ChainClientState<K>> {
         Unsend::new(
             self.client
                 .chains
@@ -730,7 +775,7 @@ impl<P: 'static, S: Storage> ChainClient<P, S> {
 
     /// Gets a guarded reference to the next pending block.
     #[instrument(level = "trace", skip(self))]
-    pub fn pending_proposal(&self) -> ChainGuardMapped<Option<PendingProposal>> {
+    pub fn pending_proposal(&self) -> ChainGuardMapped<Option<PendingProposal>, K> {
         Unsend::new(self.state().inner.map(|state| state.pending_proposal()))
     }
 }
@@ -778,10 +823,11 @@ pub async fn create_bytecode_blobs(
     }
 }
 
-impl<P, S> ChainClient<P, S>
+impl<P, S, K> ChainClient<P, S, K>
 where
     P: ValidatorNodeProvider + Sync + 'static,
     S: Storage + Clone + Send + Sync + 'static,
+    K: SigningKey + Send + Sync + 'static,
 {
     /// Obtains a `ChainStateView` for this client's chain.
     #[instrument(level = "trace")]
@@ -1015,14 +1061,13 @@ where
 
     /// Obtains the key pair associated to the current identity.
     #[instrument(level = "trace")]
-    pub async fn key_pair(&self) -> Result<AccountSecretKey, ChainClientError> {
+    pub async fn key_pair(&self) -> Result<K, ChainClientError> {
         let id = self.identity().await?;
         Ok(self
             .state()
             .known_key_pairs()
             .get(&id)
-            .expect("key should be known at this point")
-            .copy())
+            .expect("key should be known at this point"))
     }
 
     /// Obtains the public key associated to the current identity.
@@ -2575,16 +2620,16 @@ where
         // Create the final block proposal.
         let proposal = if let Some(locking) = info.manager.requested_locking {
             Box::new(match *locking {
-                LockingBlock::Regular(cert) => BlockProposal::new_retry(round, cert, &key_pair),
+                LockingBlock::Regular(cert) => BlockProposal::new_retry(round, cert, key_pair),
                 LockingBlock::Fast(proposal) => {
-                    BlockProposal::new_initial(round, proposal.content.block, &key_pair)
+                    BlockProposal::new_initial(round, proposal.content.block, key_pair)
                 }
             })
         } else {
             Box::new(BlockProposal::new_initial(
                 round,
                 proposed_block.clone(),
-                &key_pair,
+                key_pair,
             ))
         };
         if !already_handled_locally {
@@ -2745,13 +2790,14 @@ where
     }
 
     /// Rotates the key of the chain.
-    #[instrument(level = "trace", skip(key_pair))]
+    ///
+    /// Replaces current owners of the chain with the new key pair.
+    #[instrument(level = "trace")]
     pub async fn rotate_key_pair(
         &self,
-        key_pair: AccountSecretKey,
+        public_key: K::PublicKey,
     ) -> Result<ClientOutcome<ConfirmedBlockCertificate>, ChainClientError> {
-        let new_public_key = self.state_mut().insert_known_key_pair(key_pair);
-        self.transfer_ownership(new_public_key.into()).await
+        self.transfer_ownership(public_key.into().into()).await
     }
 
     /// Transfers ownership of the chain to a single super owner.

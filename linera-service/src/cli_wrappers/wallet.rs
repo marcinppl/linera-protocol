@@ -21,7 +21,7 @@ use heck::ToKebabCase;
 use linera_base::{
     abi::ContractAbi,
     command::{resolve_binary, CommandExt},
-    crypto::CryptoHash,
+    crypto::{AccountSecretKey, CryptoHash},
     data_types::{Amount, Bytecode},
     identifiers::{Account, AccountOwner, ApplicationId, ChainId, MessageId, ModuleId},
     vm::VmRuntime,
@@ -841,7 +841,7 @@ impl ClientWrapper {
         Ok(())
     }
 
-    pub fn load_wallet(&self) -> Result<Wallet> {
+    pub fn load_wallet(&self) -> Result<Wallet<AccountSecretKey>> {
         util::read_json(self.wallet_path())
     }
 

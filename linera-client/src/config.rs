@@ -10,7 +10,7 @@ use std::{
 use linera_base::{
     crypto::{
         AccountPublicKey, AccountSecretKey, BcsSignable, CryptoHash, CryptoRng, Ed25519SecretKey,
-        ValidatorPublicKey, ValidatorSecretKey,
+        SigningKey, ValidatorPublicKey, ValidatorSecretKey,
     },
     data_types::{Amount, Timestamp},
     identifiers::{ChainDescription, ChainId},
@@ -21,7 +21,7 @@ use linera_execution::{
 };
 use linera_rpc::config::{ValidatorInternalNetworkConfig, ValidatorPublicNetworkConfig};
 use linera_storage::Storage;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -101,8 +101,8 @@ pub struct WalletState<W> {
     prng: Box<dyn CryptoRng>,
 }
 
-impl<W: Persist<Target = Wallet>> WalletState<W> {
-    pub async fn add_chains<Chains: IntoIterator<Item = UserChain>>(
+impl<K: SigningKey, W: Persist<Target = Wallet<K>>> WalletState<W> {
+    pub async fn add_chains<Chains: IntoIterator<Item = UserChain<K>>>(
         &mut self,
         chains: Chains,
     ) -> Result<(), Error> {
@@ -126,10 +126,10 @@ impl<W: DerefMut> DerefMut for WalletState<W> {
     }
 }
 
-impl<W: Persist<Target = Wallet>> Persist for WalletState<W> {
+impl<K, W: Persist<Target = Wallet<K>>> Persist for WalletState<W> {
     type Error = W::Error;
 
-    fn as_mut(&mut self) -> &mut Wallet {
+    fn as_mut(&mut self) -> &mut Wallet<K> {
         self.wallet.as_mut()
     }
 
@@ -141,38 +141,50 @@ impl<W: Persist<Target = Wallet>> Persist for WalletState<W> {
         Ok(())
     }
 
-    fn into_value(self) -> Wallet {
+    fn into_value(self) -> Wallet<K> {
         self.wallet.into_value()
     }
 }
 
 #[cfg(feature = "fs")]
-impl WalletState<persistent::File<Wallet>> {
-    pub fn create_from_file(path: &std::path::Path, wallet: Wallet) -> Result<Self, Error> {
+impl<K> WalletState<persistent::File<Wallet<K>>> {
+    pub fn create_from_file(path: &std::path::Path, wallet: Wallet<K>) -> Result<Self, Error>
+    where
+        K: Serialize + DeserializeOwned,
+    {
         Ok(Self::new(persistent::File::read_or_create(path, || {
             Ok(wallet)
         })?))
     }
 
-    pub fn read_from_file(path: &std::path::Path) -> Result<Self, Error> {
+    pub fn read_from_file(path: &std::path::Path) -> Result<Self, Error>
+    where
+        K: Serialize + DeserializeOwned,
+    {
         Ok(Self::new(persistent::File::read(path)?))
     }
 }
 
 #[cfg(with_indexed_db)]
-impl WalletState<persistent::IndexedDb<Wallet>> {
-    pub async fn create_from_indexed_db(key: &str, wallet: Wallet) -> Result<Self, Error> {
+impl<K> WalletState<persistent::IndexedDb<Wallet<K>>> {
+    pub async fn create_from_indexed_db(key: &str, wallet: Wallet<K>) -> Result<Self, Error>
+    where
+        K: Serialize + DeserializeOwned,
+    {
         Ok(Self::new(
             persistent::IndexedDb::read_or_create(key, wallet).await?,
         ))
     }
 
-    pub async fn read_from_indexed_db(key: &str) -> Result<Option<Self>, Error> {
+    pub async fn read_from_indexed_db(key: &str) -> Result<Option<Self>, Error>
+    where
+        K: Serialize + DeserializeOwned,
+    {
         Ok(persistent::IndexedDb::read(key).await?.map(Self::new))
     }
 }
 
-impl<W: Deref<Target = Wallet>> WalletState<W> {
+impl<K, W: Deref<Target = Wallet<K>>> WalletState<W> {
     pub fn new(wallet: W) -> Self {
         Self {
             prng: wallet.make_prng(),

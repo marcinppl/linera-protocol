@@ -3527,7 +3527,7 @@ where
     // But non-owners are not allowed to transfer the chain's funds.
     let proposal = make_child_block(&change_ownership_value)
         .with_transfer(AccountOwner::CHAIN, Recipient::Burn, Amount::from_tokens(1))
-        .into_proposal_with_round(&AccountSecretKey::generate(), Round::MultiLeader(0));
+        .into_proposal_with_round(AccountSecretKey::generate(), Round::MultiLeader(0));
     let result = worker.handle_block_proposal(proposal).await;
     assert_matches!(result, Err(WorkerError::ChainError(error)) if matches!(&*error,
         ChainError::ExecutionError(error, _) if matches!(&**error,
@@ -3536,7 +3536,7 @@ where
 
     // Without the transfer, a random key pair can propose a block.
     let proposal = make_child_block(&change_ownership_value)
-        .into_proposal_with_round(&AccountSecretKey::generate(), Round::MultiLeader(0));
+        .into_proposal_with_round(AccountSecretKey::generate(), Round::MultiLeader(0));
     let (block, _) = worker
         .stage_block_execution(proposal.content.block.clone(), None, vec![])
         .await?;

@@ -15,7 +15,10 @@ use linera_base::{
 use linera_client::{chain_listener, wallet::Wallet};
 use linera_core::{
     client::ChainClient,
-    test_utils::{FaultType, MemoryStorageBuilder, NodeProvider, StorageBuilder as _, TestBuilder},
+    test_utils::{
+        FaultType, InMemSigningKeys, MemoryStorageBuilder, NodeProvider, StorageBuilder as _,
+        TestBuilder,
+    },
 };
 use linera_storage::{DbStorage, TestClock};
 use linera_views::memory::MemoryStore;
@@ -23,26 +26,28 @@ use linera_views::memory::MemoryStore;
 use super::MutationRoot;
 
 struct ClientContext {
-    client: ChainClient<TestProvider, TestStorage>,
+    client: ChainClient<TestProvider, TestStorage, TestKey>,
     update_calls: usize,
 }
 
 type TestStorage = DbStorage<MemoryStore, TestClock>;
 type TestProvider = NodeProvider<TestStorage>;
+type TestKey = AccountSecretKey;
 
 #[async_trait]
 impl chain_listener::ClientContext for ClientContext {
     type ValidatorNodeProvider = TestProvider;
     type Storage = TestStorage;
+    type Key = TestKey;
 
-    fn wallet(&self) -> &Wallet {
+    fn wallet(&self) -> &Wallet<Self::Key> {
         unimplemented!()
     }
 
     fn make_chain_client(
         &self,
         chain_id: ChainId,
-    ) -> Result<ChainClient<TestProvider, TestStorage>, linera_client::Error> {
+    ) -> Result<ChainClient<TestProvider, TestStorage, TestKey>, linera_client::Error> {
         assert_eq!(chain_id, self.client.chain_id());
         Ok(self.client.clone())
     }
@@ -59,7 +64,7 @@ impl chain_listener::ClientContext for ClientContext {
 
     async fn update_wallet(
         &mut self,
-        _: &ChainClient<TestProvider, TestStorage>,
+        _: &ChainClient<TestProvider, TestStorage, TestKey>,
     ) -> Result<(), linera_client::Error> {
         self.update_calls += 1;
         Ok(())
@@ -69,9 +74,10 @@ impl chain_listener::ClientContext for ClientContext {
 #[tokio::test]
 async fn test_faucet_rate_limiting() {
     let storage_builder = MemoryStorageBuilder::default();
+    let keys = InMemSigningKeys::new();
     let clock = storage_builder.clock().clone();
     clock.set(Timestamp::from(0));
-    let mut builder = TestBuilder::new(storage_builder, 4, 1).await.unwrap();
+    let mut builder = TestBuilder::new(storage_builder, 4, 1, keys).await.unwrap();
     let client = builder
         .add_root_chain(1, Amount::from_tokens(6))
         .await

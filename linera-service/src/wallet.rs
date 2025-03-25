@@ -5,10 +5,16 @@ use comfy_table::{
     modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement,
     Table,
 };
-use linera_base::identifiers::{AccountOwner, ChainId};
+use linera_base::{
+    crypto::SigningKey,
+    identifiers::{AccountOwner, ChainId},
+};
 pub use linera_client::wallet::*;
 
-pub fn pretty_print(wallet: &Wallet, chain_ids: impl IntoIterator<Item = ChainId>) {
+pub fn pretty_print<K: SigningKey>(
+    wallet: &Wallet<K>,
+    chain_ids: impl IntoIterator<Item = ChainId>,
+) {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
@@ -32,10 +38,10 @@ pub fn pretty_print(wallet: &Wallet, chain_ids: impl IntoIterator<Item = ChainId
     println!("{}", table);
 }
 
-fn update_table_with_chain(
+fn update_table_with_chain<K: SigningKey>(
     table: &mut Table,
     chain_id: ChainId,
-    user_chain: &UserChain,
+    user_chain: &UserChain<K>,
     is_default_chain: bool,
 ) {
     let chain_id_cell = if is_default_chain {

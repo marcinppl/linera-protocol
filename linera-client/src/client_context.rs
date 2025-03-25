@@ -8,7 +8,7 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use futures::Future;
 use linera_base::{
-    crypto::{AccountSecretKey, CryptoHash, ValidatorPublicKey},
+    crypto::{CryptoHash, SigningKey, ValidatorPublicKey},
     data_types::{BlockHeight, Timestamp},
     identifiers::{Account, AccountOwner, ChainId, MessageId},
     ownership::ChainOwnership,
@@ -16,7 +16,9 @@ use linera_base::{
 };
 use linera_chain::types::ConfirmedBlockCertificate;
 use linera_core::{
-    client::{BlanketMessagePolicy, ChainClient, Client, MessagePolicy, PendingProposal},
+    client::{
+        BlanketMessagePolicy, ChainClient, Client, MessagePolicy, PendingProposal, SigningKeys,
+    },
     data_types::{ChainInfoQuery, ClientOutcome},
     join_set_ext::JoinSet,
     node::{CrossChainMessageDelivery, ValidatorNodeProvider},
@@ -31,7 +33,7 @@ use tracing::{debug, info};
 #[cfg(feature = "benchmark")]
 use {
     crate::benchmark::Benchmark,
-    linera_base::{data_types::Amount, identifiers::ApplicationId},
+    linera_base::{crypto::AccountSecretKey, data_types::Amount, identifiers::ApplicationId},
     linera_execution::{
         committee::{Committee, Epoch},
         system::{OpenChainConfig, SystemOperation, OPEN_CHAIN_MESSAGE_INDEX},
@@ -64,12 +66,13 @@ use crate::{
     Error,
 };
 
-pub struct ClientContext<Storage, W>
+pub struct ClientContext<Storage, W, Key>
 where
     Storage: linera_storage::Storage,
+    Key: linera_base::crypto::SigningKey,
 {
     pub wallet: WalletState<W>,
-    pub client: Arc<Client<NodeProvider, Storage>>,
+    pub client: Arc<Client<NodeProvider, Storage, Key>>,
     pub send_timeout: Duration,
     pub recv_timeout: Duration,
     pub retry_delay: Duration,
@@ -81,26 +84,31 @@ where
 
 #[cfg_attr(not(web), async_trait)]
 #[cfg_attr(web, async_trait(?Send))]
-impl<S, W> chain_listener::ClientContext for ClientContext<S, W>
+impl<S, W, K> chain_listener::ClientContext for ClientContext<S, W, K>
 where
     S: Storage + Clone + Send + Sync + 'static,
-    W: Persist<Target = Wallet> + 'static,
+    W: Persist<Target = Wallet<K>> + 'static,
+    K: SigningKey + Clone + Sync + Send + 'static,
 {
     type ValidatorNodeProvider = NodeProvider;
     type Storage = S;
+    type Key = K;
 
-    fn wallet(&self) -> &Wallet {
+    fn wallet(&self) -> &Wallet<K> {
         &self.wallet
     }
 
-    fn make_chain_client(&self, chain_id: ChainId) -> Result<ChainClient<NodeProvider, S>, Error> {
+    fn make_chain_client(
+        &self,
+        chain_id: ChainId,
+    ) -> Result<ChainClient<NodeProvider, S, K>, Error> {
         self.make_chain_client(chain_id)
     }
 
     async fn update_wallet_for_new_chain(
         &mut self,
         chain_id: ChainId,
-        key_pair: Option<AccountSecretKey>,
+        key_pair: Option<K>,
         timestamp: Timestamp,
     ) -> Result<(), Error> {
         self.update_wallet_for_new_chain(chain_id, key_pair, timestamp)
@@ -108,18 +116,22 @@ where
         self.save_wallet().await
     }
 
-    async fn update_wallet(&mut self, client: &ChainClient<NodeProvider, S>) -> Result<(), Error> {
+    async fn update_wallet(
+        &mut self,
+        client: &ChainClient<NodeProvider, S, K>,
+    ) -> Result<(), Error> {
         self.update_wallet_from_client(client).await
     }
 }
 
-impl<S, W> ClientContext<S, W>
+impl<S, W, K> ClientContext<S, W, K>
 where
     S: Storage + Clone + Send + Sync + 'static,
-    W: Persist<Target = Wallet>,
+    W: Persist<Target = Wallet<K>>,
+    K: SigningKey + Send + Sync + 'static,
 {
     /// Returns a reference to the wallet.
-    pub fn wallet(&self) -> &Wallet {
+    pub fn wallet(&self) -> &Wallet<K> {
         &self.wallet
     }
 
@@ -130,7 +142,7 @@ where
 
     pub async fn mutate_wallet<R: Send>(
         &mut self,
-        mutation: impl FnOnce(&mut Wallet) -> R + Send,
+        mutation: impl FnOnce(&mut Wallet<K>) -> R + Send,
     ) -> Result<R, Error> {
         self.wallet
             .mutate(mutation)
@@ -240,16 +252,20 @@ where
             .expect("No chain specified in wallet with no default chain")
     }
 
-    fn make_chain_client(&self, chain_id: ChainId) -> Result<ChainClient<NodeProvider, S>, Error> {
+    fn make_chain_client(&self, chain_id: ChainId) -> Result<ChainClient<NodeProvider, S, K>, Error>
+    where
+        K: Clone,
+    {
         // We only create clients for chains we have in the wallet, or for the admin chain.
-        let chain = match self.wallet.get(chain_id) {
+        let chain: UserChain<K> = match self.wallet.get(chain_id) {
             Some(chain) => chain.clone(),
             None if chain_id == self.wallet.genesis_admin_chain() => {
                 UserChain::make_other(self.wallet.genesis_admin_chain(), Timestamp::from(0))
             }
             None => return Err(error::Inner::NonexistentChain(chain_id).into()),
         };
-        let known_key_pairs = chain.key_pair.into_iter().collect();
+        let known_key_pairs = Box::new(chain.key_pair.into_iter().collect::<Vec<_>>());
+
         Ok(self.make_chain_client_internal(
             chain_id,
             known_key_pairs,
@@ -263,12 +279,12 @@ where
     fn make_chain_client_internal(
         &self,
         chain_id: ChainId,
-        known_key_pairs: Vec<AccountSecretKey>,
+        known_key_pairs: Box<dyn SigningKeys<K>>,
         block_hash: Option<CryptoHash>,
         timestamp: Timestamp,
         next_block_height: BlockHeight,
         pending_proposal: Option<PendingProposal>,
-    ) -> ChainClient<NodeProvider, S> {
+    ) -> ChainClient<NodeProvider, S, K> {
         let mut chain_client = self.client.create_chain_client(
             chain_id,
             known_key_pairs,
@@ -307,7 +323,7 @@ where
 
     pub async fn update_wallet_from_client(
         &mut self,
-        client: &ChainClient<NodeProvider, S>,
+        client: &ChainClient<NodeProvider, S, K>,
     ) -> Result<(), Error> {
         self.wallet.as_mut().update_from_state(client).await;
         self.save_wallet().await
@@ -317,7 +333,7 @@ where
     pub async fn update_wallet_for_new_chain(
         &mut self,
         chain_id: ChainId,
-        key_pair: Option<AccountSecretKey>,
+        key_pair: Option<K>,
         timestamp: Timestamp,
     ) -> Result<(), Error> {
         self.update_wallet_for_new_chain_internal(chain_id, key_pair, timestamp)
@@ -327,14 +343,14 @@ where
     async fn update_wallet_for_new_chain_internal(
         &mut self,
         chain_id: ChainId,
-        key_pair: Option<AccountSecretKey>,
+        key_pair: Option<K>,
         timestamp: Timestamp,
     ) -> Result<(), Error> {
         if self.wallet.get(chain_id).is_none() {
             self.mutate_wallet(|w| {
                 w.insert(UserChain {
                     chain_id,
-                    key_pair: key_pair.as_ref().map(|kp| kp.copy()),
+                    key_pair,
                     block_hash: None,
                     timestamp,
                     next_block_height: BlockHeight::ZERO,
@@ -349,7 +365,7 @@ where
 
     pub async fn process_inbox(
         &mut self,
-        chain_client: &ChainClient<NodeProvider, S>,
+        chain_client: &ChainClient<NodeProvider, S, K>,
     ) -> Result<Vec<ConfirmedBlockCertificate>, Error> {
         let mut certificates = Vec::new();
         // Try processing the inbox optimistically without waiting for validator notifications.
@@ -473,11 +489,11 @@ where
     /// timeout, it will wait and retry.
     pub async fn apply_client_command<E, F, Fut, T>(
         &mut self,
-        client: &ChainClient<NodeProvider, S>,
+        client: &ChainClient<NodeProvider, S, K>,
         mut f: F,
     ) -> Result<T, Error>
     where
-        F: FnMut(&ChainClient<NodeProvider, S>) -> Fut,
+        F: FnMut(&ChainClient<NodeProvider, S, K>) -> Fut,
         Fut: Future<Output = Result<ClientOutcome<T>, E>>,
         Error: From<E>,
     {
@@ -511,7 +527,10 @@ where
         &mut self,
         chain_id: Option<ChainId>,
         ownership_config: ChainOwnershipConfig,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        K: Clone,
+    {
         let chain_id = chain_id.unwrap_or_else(|| self.default_chain());
         let chain_client = self.make_chain_client(chain_id)?;
         info!("Changing ownership for chain {}", chain_id);
@@ -539,14 +558,15 @@ where
 }
 
 #[cfg(feature = "fs")]
-impl<S, W> ClientContext<S, W>
+impl<S, W, K> ClientContext<S, W, K>
 where
     S: Storage + Clone + Send + Sync + 'static,
-    W: Persist<Target = Wallet>,
+    W: Persist<Target = Wallet<K>>,
+    K: SigningKey + Send + Sync + 'static,
 {
     pub async fn publish_module(
         &mut self,
-        chain_client: &ChainClient<NodeProvider, S>,
+        chain_client: &ChainClient<NodeProvider, S, K>,
         contract: PathBuf,
         service: PathBuf,
         vm_runtime: VmRuntime,
@@ -584,7 +604,7 @@ where
 
     pub async fn publish_data_blob(
         &mut self,
-        chain_client: &ChainClient<NodeProvider, S>,
+        chain_client: &ChainClient<NodeProvider, S, K>,
         blob_path: PathBuf,
     ) -> Result<CryptoHash, Error> {
         info!("Loading data blob file");
@@ -613,7 +633,7 @@ where
     // TODO(#2490): Consider removing or renaming this.
     pub async fn read_data_blob(
         &mut self,
-        chain_client: &ChainClient<NodeProvider, S>,
+        chain_client: &ChainClient<NodeProvider, S, K>,
         hash: CryptoHash,
     ) -> Result<(), Error> {
         info!("Verifying data blob");
@@ -634,10 +654,10 @@ where
 }
 
 #[cfg(feature = "benchmark")]
-impl<S, W> ClientContext<S, W>
+impl<S, W> ClientContext<S, W, AccountSecretKey>
 where
     S: Storage + Clone + Send + Sync + 'static,
-    W: Persist<Target = Wallet>,
+    W: Persist<Target = Wallet<AccountSecretKey>>,
 {
     pub async fn prepare_for_benchmark(
         &mut self,
@@ -647,7 +667,7 @@ where
         fungible_application_id: Option<ApplicationId>,
     ) -> Result<
         (
-            HashMap<ChainId, ChainClient<NodeProvider, S>>,
+            HashMap<ChainId, ChainClient<NodeProvider, S, AccountSecretKey>>,
             Epoch,
             Vec<(ChainId, Vec<Operation>, AccountSecretKey)>,
             Committee,
@@ -695,7 +715,7 @@ where
         let committee = committees
             .remove(&epoch)
             .expect("current epoch should have a committee");
-        let blocks_infos = Benchmark::<S>::make_benchmark_block_info(
+        let blocks_infos = Benchmark::<S, AccountSecretKey>::make_benchmark_block_info(
             key_pairs,
             transactions_per_block,
             fungible_application_id,
@@ -732,7 +752,7 @@ where
     }
 
     async fn process_inbox_without_updating_wallet(
-        chain_client: &ChainClient<NodeProvider, S>,
+        chain_client: &ChainClient<NodeProvider, S, AccountSecretKey>,
     ) -> Result<Vec<ConfirmedBlockCertificate>, Error> {
         // Try processing the inbox optimistically without waiting for validator notifications.
         chain_client.synchronize_from_validators().await?;
@@ -754,7 +774,7 @@ where
     ) -> Result<
         (
             HashMap<ChainId, AccountSecretKey>,
-            HashMap<ChainId, ChainClient<NodeProvider, S>>,
+            HashMap<ChainId, ChainClient<NodeProvider, S, AccountSecretKey>>,
         ),
         Error,
     > {
@@ -770,7 +790,7 @@ where
             let key_pair = self
                 .wallet
                 .get(chain_id)
-                .and_then(|chain| chain.key_pair.as_ref().map(|kp| kp.copy()))
+                .and_then(|chain| chain.key_pair.clone())
                 .unwrap();
             let chain_client = self.make_chain_client(chain_id)?;
             let ownership = chain_client.chain_info().await?.manager.ownership;
@@ -824,12 +844,12 @@ where
                     .message_id_for_operation(i, OPEN_CHAIN_MESSAGE_INDEX)
                     .expect("failed to create new chain");
                 let chain_id = ChainId::child(message_id);
-                benchmark_chains.insert(chain_id, key_pair.copy());
+                benchmark_chains.insert(chain_id, key_pair.clone());
                 self.client.track_chain(chain_id);
 
                 let chain_client = self.make_chain_client_internal(
                     chain_id,
-                    vec![key_pair.copy()],
+                    Box::new(vec![key_pair.clone()]),
                     None,
                     certificate.block().header.timestamp,
                     BlockHeight::ZERO,
@@ -864,7 +884,7 @@ where
 
     async fn execute_open_chains_operations(
         num_new_chains: usize,
-        chain_client: &ChainClient<NodeProvider, S>,
+        chain_client: &ChainClient<NodeProvider, S, AccountSecretKey>,
         balance: Amount,
         key_pair: &AccountSecretKey,
         admin_id: ChainId,
@@ -914,7 +934,7 @@ where
         let operations: Vec<_> = key_pairs
             .iter()
             .map(|(chain_id, key_pair)| {
-                Benchmark::<S>::fungible_transfer(
+                Benchmark::<S, AccountSecretKey>::fungible_transfer(
                     application_id,
                     *chain_id,
                     default_key,

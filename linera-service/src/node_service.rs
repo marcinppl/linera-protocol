@@ -154,11 +154,11 @@ where
         mut f: F,
     ) -> Result<T, Error>
     where
-        F: FnMut(ChainClient<C::ValidatorNodeProvider, C::Storage>) -> Fut,
+        F: FnMut(ChainClient<C::ValidatorNodeProvider, C::Storage, C::Key>) -> Fut,
         Fut: Future<
             Output = (
                 Result<ClientOutcome<T>, Error>,
-                ChainClient<C::ValidatorNodeProvider, C::Storage>,
+                ChainClient<C::ValidatorNodeProvider, C::Storage, C::Key>,
             ),
         >,
     {

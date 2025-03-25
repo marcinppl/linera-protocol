@@ -21,7 +21,7 @@ use chrono::Utc;
 use colored::Colorize;
 use futures::{lock::Mutex, FutureExt as _, StreamExt};
 use linera_base::{
-    crypto::{AccountSecretKey, CryptoHash, CryptoRng, Ed25519SecretKey},
+    crypto::{AccountSecretKey, CryptoHash, CryptoRng, Ed25519SecretKey, SigningKey},
     data_types::{ApplicationPermissions, Timestamp},
     identifiers::{AccountOwner, ChainDescription, ChainId},
     ownership::ChainOwnership,
@@ -89,7 +89,7 @@ impl Runnable for Job {
         S: Storage + Clone + Send + Sync + 'static,
     {
         let Job(options) = self;
-        let wallet = options.wallet().await?;
+        let wallet = options.wallet::<AccountSecretKey>().await?;
         let mut context = ClientContext::new(storage.clone(), options.clone(), wallet);
         let command = options.command;
 
@@ -767,7 +767,7 @@ impl Runnable for Job {
                     )
                     .await?;
 
-                linera_client::benchmark::Benchmark::<S>::run_benchmark(
+                linera_client::benchmark::Benchmark::<S, AccountSecretKey>::run_benchmark(
                     num_chains,
                     transactions_per_block,
                     bps,
@@ -784,7 +784,7 @@ impl Runnable for Job {
                     info!("Closing chains...");
                     let stream = stream::iter(chain_clients.values().cloned())
                         .map(|chain_client| async move {
-                            linera_client::benchmark::Benchmark::<S>::close_benchmark_chain(
+                            linera_client::benchmark::Benchmark::<S, AccountSecretKey>::close_benchmark_chain(
                                 &chain_client,
                             )
                             .await?;
@@ -1216,13 +1216,14 @@ impl Job {
     /// Prints a warning message to explain that the wallet has been initialized using data from
     /// untrusted nodes, and gives instructions to verify that we are connected to the right
     /// network.
-    async fn print_peg_certificate_hash<S>(
+    async fn print_peg_certificate_hash<S, K>(
         storage: S,
         chain_ids: impl IntoIterator<Item = ChainId>,
-        context: &ClientContext<S, impl Persist<Target = Wallet>>,
+        context: &ClientContext<S, impl Persist<Target = Wallet<K>>, K>,
     ) -> anyhow::Result<()>
     where
         S: Storage + Clone + Send + Sync + 'static,
+        K: SigningKey + Send + Sync,
     {
         let mut chains = HashMap::new();
         for chain_id in chain_ids {
@@ -1550,8 +1551,9 @@ async fn run(options: &ClientOptions) -> Result<i32, anyhow::Error> {
 
         ClientCommand::Keygen => {
             let start_time = Instant::now();
-            let mut wallet = options.wallet().await?;
-            let key_pair = wallet.generate_key_pair();
+            let mut wallet: linera_client::config::WalletState<persistent::File<Wallet<_>>> =
+                options.wallet().await?;
+            let key_pair: AccountSecretKey = wallet.generate_key_pair();
             let owner = AccountOwner::from(key_pair.public());
             wallet
                 .mutate(|w| w.add_unassigned_key_pair(key_pair))
@@ -1740,16 +1742,19 @@ async fn run(options: &ClientOptions) -> Result<i32, anyhow::Error> {
                     ensure!(!owned, "Cannot specify both --owned and a chain ID");
                     vec![*chain_id]
                 } else if *owned {
-                    options.wallet().await?.owned_chain_ids()
+                    options
+                        .wallet::<AccountSecretKey>()
+                        .await?
+                        .owned_chain_ids()
                 } else {
-                    options.wallet().await?.chain_ids()
+                    options.wallet::<AccountSecretKey>().await?.chain_ids()
                 };
                 if *short {
                     for chain_id in chain_ids {
                         println!("{chain_id}");
                     }
                 } else {
-                    wallet::pretty_print(&*options.wallet().await?, chain_ids);
+                    wallet::pretty_print(&*options.wallet::<AccountSecretKey>().await?, chain_ids);
                 }
                 info!("Wallet shown in {} ms", start_time.elapsed().as_millis());
                 Ok(0)
@@ -1758,7 +1763,7 @@ async fn run(options: &ClientOptions) -> Result<i32, anyhow::Error> {
             WalletCommand::SetDefault { chain_id } => {
                 let start_time = Instant::now();
                 options
-                    .wallet()
+                    .wallet::<AccountSecretKey>()
                     .await?
                     .mutate(|w| w.set_default_chain(*chain_id))
                     .await??;
@@ -1772,7 +1777,7 @@ async fn run(options: &ClientOptions) -> Result<i32, anyhow::Error> {
             WalletCommand::ForgetKeys { chain_id } => {
                 let start_time = Instant::now();
                 options
-                    .wallet()
+                    .wallet::<AccountSecretKey>()
                     .await?
                     .mutate(|w| w.forget_keys(chain_id))
                     .await??;
@@ -1786,7 +1791,7 @@ async fn run(options: &ClientOptions) -> Result<i32, anyhow::Error> {
             WalletCommand::FollowChain { chain_id } => {
                 let start_time = Instant::now();
                 options
-                    .wallet()
+                    .wallet::<AccountSecretKey>()
                     .await?
                     .mutate(|wallet| {
                         wallet.extend([UserChain::make_other(*chain_id, Timestamp::now())])
@@ -1802,7 +1807,7 @@ async fn run(options: &ClientOptions) -> Result<i32, anyhow::Error> {
             WalletCommand::ForgetChain { chain_id } => {
                 let start_time = Instant::now();
                 options
-                    .wallet()
+                    .wallet::<AccountSecretKey>()
                     .await?
                     .mutate(|w| w.forget_chain(chain_id))
                     .await??;
@@ -1854,7 +1859,7 @@ Make sure to use a Linera client compatible with this network.
                 };
                 let timestamp = genesis_config.timestamp;
                 options
-                    .create_wallet(genesis_config, *testing_prng_seed)?
+                    .create_wallet::<AccountSecretKey>(genesis_config, *testing_prng_seed)?
                     .mutate(|wallet| {
                         wallet.extend(
                             with_other_chains

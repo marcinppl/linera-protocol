@@ -10,7 +10,7 @@ use linera_base::{
 use linera_chain::data_types::ProposedBlock;
 use linera_core::{
     client::PendingProposal,
-    test_utils::{MemoryStorageBuilder, StorageBuilder, TestBuilder},
+    test_utils::{InMemSigningKeys, MemoryStorageBuilder, StorageBuilder, TestBuilder},
 };
 use linera_execution::committee::Epoch;
 use rand::{rngs::StdRng, SeedableRng as _};
@@ -27,8 +27,9 @@ use crate::{
 async fn test_save_wallet_with_pending_blobs() -> anyhow::Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
     let storage_builder = MemoryStorageBuilder::default();
+    let keys = InMemSigningKeys::new();
     let clock = storage_builder.clock().clone();
-    let mut builder = TestBuilder::new(storage_builder, 4, 1).await?;
+    let mut builder = TestBuilder::new(storage_builder, 4, 1, keys).await?;
     let chain_id = ChainId::root(0);
     builder.add_root_chain(0, Amount::ONE).await?;
     let storage = builder.make_storage().await?;

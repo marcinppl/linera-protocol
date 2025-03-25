@@ -4,7 +4,7 @@
 use std::{collections::HashMap, iter};
 
 use linera_base::{
-    crypto::{AccountPublicKey, AccountSecretKey},
+    crypto::{AccountPublicKey, AccountSecretKey, SigningKey},
     data_types::{Amount, Timestamp},
     hashed::Hashed,
     identifiers::{AccountOwner, ApplicationId, ChainId},
@@ -82,23 +82,25 @@ struct HistogramSnapshot {
     sum: f64,
 }
 
-pub struct Benchmark<Storage>
+pub struct Benchmark<Storage, Key>
 where
     Storage: linera_storage::Storage,
+    Key: SigningKey,
 {
-    _phantom: std::marker::PhantomData<Storage>,
+    _phantom: std::marker::PhantomData<(Storage, Key)>,
 }
 
-impl<S> Benchmark<S>
+impl<S, K> Benchmark<S, K>
 where
     S: Storage + Clone + Send + Sync + 'static,
+    K: SigningKey + Clone + Send + Sync + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub async fn run_benchmark(
         num_chains: usize,
         transactions_per_block: usize,
         bps: Option<usize>,
-        chain_clients: HashMap<ChainId, ChainClient<NodeProvider, S>>,
+        chain_clients: HashMap<ChainId, ChainClient<NodeProvider, S, K>>,
         epoch: Epoch,
         blocks_infos: Vec<(ChainId, Vec<Operation>, AccountSecretKey)>,
         committee: Committee,
@@ -480,7 +482,7 @@ where
         operations: Vec<Operation>,
         key_pair: AccountSecretKey,
         epoch: Epoch,
-        chain_client: ChainClient<NodeProvider, S>,
+        chain_client: ChainClient<NodeProvider, S, K>,
         shutdown_notifier: CancellationToken,
         sender: crossbeam_channel::Sender<()>,
         committee: Committee,
@@ -556,7 +558,7 @@ where
 
     /// Closes the chain that was created for the benchmark.
     pub async fn close_benchmark_chain(
-        chain_client: &ChainClient<NodeProvider, S>,
+        chain_client: &ChainClient<NodeProvider, S, K>,
     ) -> Result<(), BenchmarkError> {
         let start = Instant::now();
         chain_client
@@ -575,10 +577,10 @@ where
 
     /// Generates information related to one block per chain, up to `num_chains` blocks.
     pub fn make_benchmark_block_info(
-        key_pairs: HashMap<ChainId, AccountSecretKey>,
+        key_pairs: HashMap<ChainId, K>,
         transactions_per_block: usize,
         fungible_application_id: Option<ApplicationId>,
-    ) -> Vec<(ChainId, Vec<Operation>, AccountSecretKey)> {
+    ) -> Vec<(ChainId, Vec<Operation>, K)> {
         let mut blocks_infos = Vec::new();
         let mut previous_chain_id = *key_pairs
             .iter()

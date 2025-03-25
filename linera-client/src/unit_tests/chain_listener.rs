@@ -16,7 +16,9 @@ use linera_base::{
 use linera_core::{
     client::{ChainClient, Client},
     node::CrossChainMessageDelivery,
-    test_utils::{MemoryStorageBuilder, NodeProvider, StorageBuilder as _, TestBuilder},
+    test_utils::{
+        InMemSigningKeys, MemoryStorageBuilder, NodeProvider, StorageBuilder as _, TestBuilder,
+    },
     DEFAULT_GRACE_PERIOD,
 };
 use linera_execution::system::Recipient;
@@ -33,10 +35,11 @@ use crate::{
 
 type TestStorage = DbStorage<MemoryStore, TestClock>;
 type TestProvider = NodeProvider<TestStorage>;
+type TestKey = AccountSecretKey;
 
 struct ClientContext {
-    wallet: Wallet,
-    client: Arc<Client<TestProvider, TestStorage>>,
+    wallet: Wallet<TestKey>,
+    client: Arc<Client<TestProvider, TestStorage, TestKey>>,
 }
 
 #[cfg_attr(not(web), async_trait)]
@@ -44,25 +47,28 @@ struct ClientContext {
 impl chain_listener::ClientContext for ClientContext {
     type ValidatorNodeProvider = TestProvider;
     type Storage = TestStorage;
+    type Key = TestKey;
 
-    fn wallet(&self) -> &Wallet {
+    fn wallet(&self) -> &Wallet<Self::Key> {
         &self.wallet
     }
 
     fn make_chain_client(
         &self,
         chain_id: ChainId,
-    ) -> Result<ChainClient<TestProvider, TestStorage>, Error> {
+    ) -> Result<ChainClient<TestProvider, TestStorage, TestKey>, Error> {
         let chain = self
             .wallet
             .get(chain_id)
             .unwrap_or_else(|| panic!("Unknown chain: {}", chain_id));
-        let known_key_pairs = chain
-            .key_pair
-            .as_ref()
-            .map(|kp| kp.copy())
-            .into_iter()
-            .collect();
+        let known_key_pairs = Box::new(
+            chain
+                .key_pair
+                .as_ref()
+                .map(|kp| kp.copy())
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
         Ok(self.client.create_chain_client(
             chain_id,
             known_key_pairs,
@@ -96,7 +102,7 @@ impl chain_listener::ClientContext for ClientContext {
 
     async fn update_wallet(
         &mut self,
-        client: &ChainClient<TestProvider, TestStorage>,
+        client: &ChainClient<TestProvider, TestStorage, TestKey>,
     ) -> Result<(), Error> {
         self.wallet.update_from_state(client).await;
         Ok(())
@@ -109,10 +115,11 @@ impl chain_listener::ClientContext for ClientContext {
 async fn test_chain_listener() -> anyhow::Result<()> {
     // Create two chains.
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let keys = InMemSigningKeys::new();
     let config = ChainListenerConfig::default();
     let storage_builder = MemoryStorageBuilder::default();
     let clock = storage_builder.clock().clone();
-    let mut builder = TestBuilder::new(storage_builder, 4, 1).await?;
+    let mut builder = TestBuilder::new(storage_builder, 4, 1, keys).await?;
     let client0 = builder.add_root_chain(0, Amount::ONE).await?;
     let chain_id0 = client0.chain_id();
     let client1 = builder.add_root_chain(1, Amount::ONE).await?;

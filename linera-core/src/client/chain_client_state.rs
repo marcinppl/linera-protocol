@@ -2,27 +2,23 @@
 // Copyright (c) Zefchain Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use linera_base::{
-    crypto::{AccountPublicKey, AccountSecretKey, CryptoHash},
+    crypto::{CryptoHash, SigningKey},
     data_types::{Blob, BlockHeight, Timestamp},
     ensure,
-    identifiers::AccountOwner,
     ownership::ChainOwnership,
 };
 use linera_chain::data_types::ProposedBlock;
 use tokio::sync::Mutex;
 
-use super::{ChainClientError, PendingProposal};
+use super::{ChainClientError, PendingProposal, SigningKeys};
 use crate::data_types::ChainInfo;
 
 /// The state of our interaction with a particular chain: how far we have synchronized it and
 /// whether we are currently attempting to propose a new block.
-pub struct ChainClientState {
+pub struct ChainClientState<S: SigningKey> {
     /// Latest block hash, if any.
     block_hash: Option<CryptoHash>,
     /// The earliest possible timestamp for the next block.
@@ -35,25 +31,21 @@ pub struct ChainClientState {
     /// This is always at the same height as `next_block_height`.
     pending_proposal: Option<PendingProposal>,
     /// Known key pairs from present and past identities.
-    known_key_pairs: BTreeMap<AccountOwner, AccountSecretKey>,
+    known_key_pairs: Box<dyn SigningKeys<S>>,
 
     /// A mutex that is held whilst we are performing operations that should not be
     /// attempted by multiple clients at the same time.
     client_mutex: Arc<Mutex<()>>,
 }
 
-impl ChainClientState {
+impl<S: SigningKey> ChainClientState<S> {
     pub fn new(
-        known_key_pairs: Vec<AccountSecretKey>,
+        known_key_pairs: Box<dyn SigningKeys<S>>,
         block_hash: Option<CryptoHash>,
         timestamp: Timestamp,
         next_block_height: BlockHeight,
         pending_proposal: Option<PendingProposal>,
-    ) -> ChainClientState {
-        let known_key_pairs = known_key_pairs
-            .into_iter()
-            .map(|kp| (AccountOwner::from(kp.public()), kp))
-            .collect();
+    ) -> ChainClientState<S> {
         ChainClientState {
             known_key_pairs,
             block_hash,
@@ -97,8 +89,12 @@ impl ChainClientState {
         }
     }
 
-    pub fn known_key_pairs(&self) -> &BTreeMap<AccountOwner, AccountSecretKey> {
-        &self.known_key_pairs
+    pub fn known_key_pairs(&self) -> &dyn SigningKeys<S> {
+        &*self.known_key_pairs
+    }
+
+    pub fn known_key_pairs_mut(&mut self) -> &mut Box<dyn SigningKeys<S>> {
+        &mut self.known_key_pairs
     }
 
     /// Returns whether the given ownership includes anyone whose secret key we don't have.
@@ -106,12 +102,6 @@ impl ChainClientState {
         ownership
             .all_owners()
             .any(|owner| !self.known_key_pairs.contains_key(owner))
-    }
-
-    pub(super) fn insert_known_key_pair(&mut self, key_pair: AccountSecretKey) -> AccountPublicKey {
-        let new_public_key = key_pair.public();
-        self.known_key_pairs.insert(new_public_key.into(), key_pair);
-        new_public_key
     }
 
     pub(super) fn update_from_info(&mut self, info: &ChainInfo) {

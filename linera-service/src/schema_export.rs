@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use linera_base::{
-    crypto::{AccountSecretKey, CryptoHash},
+    crypto::{AccountSecretKey, CryptoHash, SigningKey},
     data_types::{BlobContent, Timestamp},
     identifiers::{BlobId, ChainId},
 };
@@ -164,41 +164,46 @@ impl ValidatorNodeProvider for DummyValidatorNodeProvider {
 )]
 struct Options {}
 
-struct DummyContext<P, S> {
-    _phantom: std::marker::PhantomData<(P, S)>,
+struct DummyContext<P, S, K> {
+    _phantom: std::marker::PhantomData<(P, S, K)>,
 }
 
 #[async_trait]
-impl<P: ValidatorNodeProvider + Send, S: Storage + Clone + Send + Sync + 'static> ClientContext
-    for DummyContext<P, S>
+impl<
+        P: ValidatorNodeProvider + Send,
+        S: Storage + Clone + Send + Sync + 'static,
+        K: SigningKey + Clone + Send + Sync + 'static,
+    > ClientContext for DummyContext<P, S, K>
 {
     type ValidatorNodeProvider = P;
     type Storage = S;
+    type Key = K;
 
-    fn wallet(&self) -> &Wallet {
+    fn wallet(&self) -> &Wallet<K> {
         unimplemented!()
     }
 
-    fn make_chain_client(&self, _: ChainId) -> Result<ChainClient<P, S>, Error> {
+    fn make_chain_client(&self, _: ChainId) -> Result<ChainClient<P, S, K>, Error> {
         unimplemented!()
     }
 
     async fn update_wallet_for_new_chain(
         &mut self,
         _: ChainId,
-        _: Option<AccountSecretKey>,
+        _: Option<K>,
         _: Timestamp,
     ) -> Result<(), Error> {
         Ok(())
     }
 
-    async fn update_wallet(&mut self, _: &ChainClient<P, S>) -> Result<(), Error> {
+    async fn update_wallet(&mut self, _: &ChainClient<P, S, K>) -> Result<(), Error> {
         Ok(())
     }
 
     fn clients(
         &self,
-    ) -> Result<Vec<ChainClient<Self::ValidatorNodeProvider, Self::Storage>>, Error> {
+    ) -> Result<Vec<ChainClient<Self::ValidatorNodeProvider, Self::Storage, Self::Key>>, Error>
+    {
         Ok(vec![])
     }
 }
@@ -213,7 +218,7 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("storage");
     let config = ChainListenerConfig::default();
-    let context = DummyContext::<DummyValidatorNodeProvider, _> {
+    let context = DummyContext::<DummyValidatorNodeProvider, _, AccountSecretKey> {
         _phantom: std::marker::PhantomData,
     };
     let service = NodeService::new(

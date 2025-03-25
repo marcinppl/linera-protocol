@@ -11,6 +11,7 @@ mod secp256k1;
 use std::{fmt::Display, io, num::ParseIntError, str::FromStr};
 
 use alloy_primitives::FixedBytes;
+use async_trait::async_trait;
 use custom_debug_derive::Debug;
 pub use ed25519::{Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature};
 pub use hash::*;
@@ -71,6 +72,15 @@ pub enum AccountSecretKey {
     Secp256k1(secp256k1::Secp256k1SecretKey),
 }
 
+impl Clone for AccountSecretKey {
+    fn clone(&self) -> Self {
+        match self {
+            AccountSecretKey::Ed25519(secret) => AccountSecretKey::Ed25519(secret.copy()),
+            AccountSecretKey::Secp256k1(secret) => AccountSecretKey::Secp256k1(secret.copy()),
+        }
+    }
+}
+
 /// The signature of a chain owner.
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum AccountSignature {
@@ -118,6 +128,12 @@ impl AccountSecretKey {
     /// Generates a new key pair using the operating system's RNG.
     pub fn generate() -> Self {
         AccountSecretKey::Ed25519(Ed25519SecretKey::generate())
+    }
+
+    #[cfg(with_getrandom)]
+    /// Generates a new key pair from the given RNG. Use with care.
+    pub fn generate_from<R: CryptoRng>(rng: &mut R) -> Self {
+        AccountSecretKey::Ed25519(Ed25519SecretKey::generate_from(rng))
     }
 }
 
@@ -210,6 +226,58 @@ impl TryFrom<&[u8]> for AccountSignature {
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         AccountSignature::from_slice(bytes)
+    }
+}
+
+/// A trait for signing keys.
+#[cfg_attr(not(web), async_trait)]
+#[cfg_attr(web, async_trait(?Send))]
+pub trait SigningKey {
+    /// The public key type corresponding to this signing key.
+    type PublicKey: Into<AccountPublicKey> + std::fmt::Debug;
+
+    /// Signs the given value and returns the signature.
+    fn sign<'a, 'b, A: BcsSignable<'b>>(&'a self, value: &A) -> AccountSignature;
+
+    /// Returns the public key of this signing key.
+    fn public(&self) -> AccountPublicKey;
+
+    /// Generates a new signing key for the Self type.\
+    #[cfg(all(with_testing, with_getrandom))]
+    fn generate_new() -> Self;
+}
+
+impl SigningKey for AccountSecretKey {
+    type PublicKey = AccountPublicKey;
+
+    fn sign<'a, 'b, A: BcsSignable<'b>>(&'a self, value: &A) -> AccountSignature {
+        AccountSecretKey::sign(self, value)
+    }
+
+    fn public(&self) -> AccountPublicKey {
+        AccountSecretKey::public(self)
+    }
+
+    #[cfg(all(with_testing, with_getrandom))]
+    fn generate_new() -> Self {
+        AccountSecretKey::generate()
+    }
+}
+
+impl SigningKey for &AccountSecretKey {
+    type PublicKey = AccountPublicKey;
+
+    fn sign<'a, 'b, A: BcsSignable<'b>>(&'a self, value: &A) -> AccountSignature {
+        AccountSecretKey::sign(self, value)
+    }
+
+    fn public(&self) -> AccountPublicKey {
+        AccountSecretKey::public(self)
+    }
+
+    #[cfg(all(with_testing, with_getrandom))]
+    fn generate_new() -> Self {
+        unimplemented!("generate_new() is not implemented for &AccountSecretKey")
     }
 }
 
