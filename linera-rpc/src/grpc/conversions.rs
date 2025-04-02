@@ -448,7 +448,7 @@ impl TryFrom<api::Certificate> for TimeoutCertificate {
         let cert_type = certificate.kind;
 
         if cert_type == api::CertificateKind::Timeout as i32 {
-            let value: Hashed<Timeout> = bincode::deserialize(&certificate.value)?;
+            let value: Timeout = bincode::deserialize(&certificate.value)?;
             Ok(TimeoutCertificate::new(value, round, signatures))
         } else {
             Err(GrpcProtoConversionError::InvalidCertificateType)
@@ -925,7 +925,7 @@ impl TryFrom<api::Certificate> for Certificate {
             let value: Hashed<ValidatedBlock> = bincode::deserialize(&certificate.value)?;
             Certificate::Validated(ValidatedBlockCertificate::new(value, round, signatures))
         } else if certificate.kind == api::CertificateKind::Timeout as i32 {
-            let value: Hashed<Timeout> = bincode::deserialize(&certificate.value)?;
+            let value: Timeout = bincode::deserialize(&certificate.value)?;
             Certificate::Timeout(TimeoutCertificate::new(value, round, signatures))
         } else {
             return Err(GrpcProtoConversionError::InvalidCertificateType);

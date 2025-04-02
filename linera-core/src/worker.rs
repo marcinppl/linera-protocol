@@ -890,8 +890,8 @@ where
     /// Processes a timeout certificate
     #[instrument(skip_all, fields(
         nick = self.nickname,
-        chain_id = format!("{:.8}", certificate.inner().chain_id),
-        height = %certificate.inner().height,
+        chain_id = format!("{:.8}", certificate.inner().chain_id()),
+        height = %certificate.inner().height(),
     ))]
     pub async fn handle_timeout_certificate(
         &self,

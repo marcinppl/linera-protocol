@@ -132,7 +132,7 @@ impl BlockTestExt for ProposedBlock {
     }
 }
 
-pub trait VoteTestExt<T>: Sized {
+pub trait VoteTestExt<T: CertificateValue>: Sized {
     /// Returns a certificate for a committee consisting only of this validator.
     fn into_certificate(self) -> GenericCertificate<T>;
 }

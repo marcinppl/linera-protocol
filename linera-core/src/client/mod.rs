@@ -1088,7 +1088,7 @@ where
         committee: &Committee,
         certificate: ValidatedBlockCertificate,
     ) -> Result<ConfirmedBlockCertificate, ChainClientError> {
-        let hashed_value = Hashed::new(ConfirmedBlock::new(certificate.inner().block().clone()));
+        let hashed_value = ConfirmedBlock::new(certificate.inner().block().clone());
         let finalize_action = CommunicateAction::FinalizeBlock {
             certificate: Box::new(certificate),
             delivery: self.options.cross_chain_message_delivery,
@@ -1110,11 +1110,11 @@ where
         &self,
         committee: &Committee,
         proposal: Box<BlockProposal>,
-        value: Hashed<T>,
+        value: T,
     ) -> Result<GenericCertificate<T>, ChainClientError> {
         let submit_action = CommunicateAction::SubmitBlock {
             proposal,
-            blob_ids: value.inner().required_blob_ids().into_iter().collect(),
+            blob_ids: value.required_blob_ids().into_iter().collect(),
         };
         let certificate = self
             .communicate_chain_action(committee, submit_action, value)
@@ -1203,7 +1203,7 @@ where
         &self,
         committee: &Committee,
         action: CommunicateAction,
-        value: Hashed<T>,
+        value: T,
     ) -> Result<GenericCertificate<T>, ChainClientError> {
         let local_node = self.client.local_node.clone();
         let nodes = self.make_nodes(committee)?;
